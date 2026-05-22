@@ -2,7 +2,7 @@
   const API_KEY = "__codexPlusHideUsageAlert";
   const STYLE_ID = "codex-plus-hide-usage-alert-style";
   const HIDDEN_ATTR = "data-codex-plus-hidden-usage-alert";
-  const VERSION = 3;
+  const VERSION = 4;
 
   const previous = window[API_KEY];
   if (previous && typeof previous.destroy === "function") {
@@ -103,21 +103,6 @@
     return hasAction(node, text);
   }
 
-  function patchCodexPlusPanelStatus() {
-    for (const row of document.querySelectorAll(".codex-plus-user-script-item")) {
-      const text = candidateText(row);
-      if (!text.includes("hide-usage-alert.js")) continue;
-
-      const meta = row.querySelector(".codex-plus-user-script-meta");
-      if (!meta || !/未加载|not_loaded/i.test(meta.textContent || "")) continue;
-
-      meta.textContent = (meta.textContent || "")
-        .replace("未加载", "已加载")
-        .replace(/not_loaded/gi, "loaded");
-      row.setAttribute("data-codex-plus-hide-usage-alert-loaded", "true");
-    }
-  }
-
   function quotaBannerRoot(node) {
     const parent = node.parentElement;
     if (!parent || parent === document.body) return node;
@@ -170,7 +155,6 @@
     state.timer = 0;
     state.scans += 1;
     installStyle();
-    patchCodexPlusPanelStatus();
 
     const root = document.body || document.documentElement;
     if (!root) return;

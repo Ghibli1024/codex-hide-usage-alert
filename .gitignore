@@ -1,0 +1,6 @@
+.DS_Store
+local/
+*.local.json
+.env
+.env.local
+.env.*.local
