@@ -2,7 +2,7 @@
   const API_KEY = "__codexPlusHideUsageAlert";
   const STYLE_ID = "codex-plus-hide-usage-alert-style";
   const HIDDEN_ATTR = "data-codex-plus-hidden-usage-alert";
-  const VERSION = 4;
+  const SCRIPT_VERSION = "0.1.0";
 
   const previous = window[API_KEY];
   if (previous && typeof previous.destroy === "function") {
@@ -210,13 +210,13 @@
     }
     state.hidden.clear();
     document.getElementById(STYLE_ID)?.remove();
-    if (window[API_KEY]?.version === VERSION) {
+    if (window[API_KEY]?.version === SCRIPT_VERSION) {
       delete window[API_KEY];
     }
   }
 
   window[API_KEY] = {
-    version: VERSION,
+    version: SCRIPT_VERSION,
     state,
     scan,
     destroy,
