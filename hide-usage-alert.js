@@ -2,7 +2,7 @@
   const API_KEY = "__codexPlusHideUsageAlert";
   const STYLE_ID = "codex-plus-hide-usage-alert-style";
   const HIDDEN_ATTR = "data-codex-plus-hidden-usage-alert";
-  const SCRIPT_VERSION = "0.1.2";
+  const SCRIPT_VERSION = "0.1.3";
 
   const previous = window[API_KEY];
   if (previous && typeof previous.destroy === "function") {
@@ -24,7 +24,7 @@
   const usageCardRe =
     /(剩余\s*\d+%\s*使用量|重置频率|下次重置时间|remaining\s+\d+%\s+usage|usage\s+remaining|reset\s+frequency|next\s+reset)/i;
   const actionTextRe =
-    /(升级|Plus|upgrade|pricing|plan|重置|reset|限额|limit|quota)/i;
+    /(升级|Plus|upgrade|pricing|plan|重置|reset|限额|额度|限制|limit|quota)/i;
 
   function normalizeText(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
@@ -46,7 +46,7 @@
   function bannerBox(node) {
     if (!visibleBox(node)) return false;
     const rect = node.getBoundingClientRect();
-    if (rect.width < 300 || rect.height < 30 || rect.height > 120) return false;
+    if (rect.width < 300 || rect.height < 30 || rect.height > 220) return false;
     return true;
   }
 
