@@ -36,9 +36,18 @@
 ## 实现边界
 
 - 运行位置：由 Codex++ 作为用户脚本注入到 Codex Desktop 的 renderer 页面。
-- 工作方式：使用 `MutationObserver` 监听页面变化，匹配额度提醒相关文案和可见区域，再用 CSS 隐藏对应 DOM 节点。
+- 保护边界：0.1.4 不会隐藏 composer、`form`、`contenteditable`、`textarea` 或 `input` 本身及包含它们的候选节点。
+- 工作方式：启动时完整扫描一次；之后由 `MutationObserver` 只扫描新增或文字变化的局部 DOM，再用 CSS 隐藏匹配到的额度提醒节点。
+- 生命周期：重复注入会先销毁旧实例；`scan()` 和 `destroy()` 可重复调用，不会累积 observer、样式或隐藏标记。
 - 诊断入口：脚本会暴露 `window.__codexPlusHideUsageAlert`，可用于手动执行 `scan()` 或 `destroy()`。
 - 作用范围：只影响前端显示层，不参与账号鉴权、请求发送、模型路由或 API Key 调用。
+
+## 开发与验证
+
+```bash
+node test-matchers.js
+node --check hide-usage-alert.js
+```
 
 ## 开发文档
 

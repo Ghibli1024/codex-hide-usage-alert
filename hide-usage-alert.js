@@ -1,7 +1,10 @@
 (() => {
+  if (window.top && window.self && window.top !== window.self) return;
+
   const API_KEY = "__codexPlusHideUsageAlert";
   const STYLE_ID = "codex-plus-hide-usage-alert-style";
   const HIDDEN_ATTR = "data-codex-plus-hidden-usage-alert";
+  const HIDDEN_KIND_ATTR = `${HIDDEN_ATTR}-kind`;
   const SCRIPT_VERSION = "0.1.4";
   const PROTECTED_SURFACE_SELECTOR = [
     "[data-codex-composer-root]",
@@ -11,6 +14,18 @@
     "input",
     "form",
   ].join(",");
+  const MESSAGE_CONTENT_SELECTOR = [
+    "[data-message-author-role]",
+    "[data-testid*='message' i]",
+    "[data-test-id*='message' i]",
+    "[data-thread-find-target]",
+    "article",
+  ].join(",");
+  const CANDIDATE_SELECTOR_GROUPS = [
+    "aside",
+    '[role="alert"],[role="status"],[aria-live]',
+    "header,section,div",
+  ];
 
   const previous = window[API_KEY];
   if (previous && typeof previous.destroy === "function") {
@@ -20,7 +35,8 @@
   const state = {
     observer: null,
     timer: 0,
-    hidden: new Set(),
+    readyHandler: null,
+    pendingRoots: new Set(),
     scans: 0,
     matches: 0,
   };
@@ -38,13 +54,20 @@
     return String(value || "").replace(/\s+/g, " ").trim();
   }
 
+  function isElement(node) {
+    return !!node && node.nodeType === Node.ELEMENT_NODE;
+  }
+
   function candidateText(node) {
-    if (!node || node.nodeType !== Node.ELEMENT_NODE) return "";
+    if (!isElement(node)) return "";
     return normalizeText(node.textContent || node.innerText || "");
   }
 
   function isProtectedSurface(node) {
-    return !!node && (node.matches(PROTECTED_SURFACE_SELECTOR) || !!node.querySelector(PROTECTED_SURFACE_SELECTOR));
+    return isElement(node) && (
+      node.matches(PROTECTED_SURFACE_SELECTOR) ||
+      !!node.querySelector(PROTECTED_SURFACE_SELECTOR)
+    );
   }
 
   function visibleBox(node) {
@@ -71,15 +94,7 @@
   }
 
   function insideConversationContent(node) {
-    return !!node.closest(
-      [
-        "[data-message-author-role]",
-        "[data-testid*='message' i]",
-        "[data-test-id*='message' i]",
-        "[data-thread-find-target]",
-        "article",
-      ].join(",")
-    );
+    return isElement(node) && !!node.closest(MESSAGE_CONTENT_SELECTOR);
   }
 
   function hasAction(node, text) {
@@ -117,30 +132,19 @@
     return usageCardBox(node);
   }
 
-  function usageCardRoot(node) {
-    if (node.getAttribute("role") === "status" && looksLikeUsageCard(node)) return node;
-
-    const status = node.closest('[role="status"]');
-    if (status && looksLikeUsageCard(status)) return status;
-
-    const childStatus = node.querySelector('[role="status"]');
-    if (childStatus && looksLikeUsageCard(childStatus)) return childStatus;
-
-    return node;
-  }
-
   function hideNode(node, kind) {
-    const root = kind === "usage-card" ? usageCardRoot(node) : node;
-    if (!root || root === document.body || root === document.documentElement) return;
-    if (isProtectedSurface(root)) return;
-    root.setAttribute(HIDDEN_ATTR, "true");
-    root.setAttribute(`${HIDDEN_ATTR}-kind`, kind);
-    state.hidden.add(root);
+    if (!isElement(node) || node === document.body || node === document.documentElement) return false;
+    if (node.getAttribute(HIDDEN_ATTR) === "true") return false;
+    if (isProtectedSurface(node) || insideConversationContent(node)) return false;
+    node.setAttribute(HIDDEN_ATTR, "true");
+    node.setAttribute(HIDDEN_KIND_ATTR, kind);
     state.matches += 1;
+    return true;
   }
 
   function installStyle() {
-    if (document.getElementById(STYLE_ID)) return;
+    if (!document.documentElement) return false;
+    if (document.getElementById(STYLE_ID)) return true;
 
     const style = document.createElement("style");
     style.id = STYLE_ID;
@@ -152,48 +156,107 @@
       }
     `;
     document.documentElement.appendChild(style);
+    return true;
   }
 
-  function scan() {
-    state.timer = 0;
-    state.scans += 1;
-    installStyle();
+  function collectCandidates(root) {
+    if (!isElement(root)) return [];
 
-    const root = document.body || document.documentElement;
-    if (!root) return;
-
-    const selectors = [
-      '[role="alert"]',
-      '[role="status"]',
-      '[aria-live]',
-      "header",
-      "section",
-      "aside",
-      "div",
-    ].join(",");
-
-    for (const node of root.querySelectorAll(selectors)) {
-      if (node.getAttribute(HIDDEN_ATTR) === "true") continue;
-      if (looksLikeQuotaBanner(node)) {
-        hideNode(node, "quota-banner");
-        continue;
+    const candidates = [];
+    const seen = new Set();
+    const add = (node) => {
+      if (!seen.has(node)) {
+        seen.add(node);
+        candidates.push(node);
       }
-      if (looksLikeUsageCard(node)) hideNode(node, "usage-card");
+    };
+
+    for (const selector of CANDIDATE_SELECTOR_GROUPS) {
+      if (root.matches(selector)) add(root);
+      for (const node of root.querySelectorAll(selector)) add(node);
+    }
+    return candidates;
+  }
+
+  function classifyCandidate(node) {
+    if (!isElement(node)) return false;
+    if (node.closest(`[${HIDDEN_ATTR}="true"]`)) return false;
+    if (node.querySelector(`[${HIDDEN_ATTR}="true"]`)) return false;
+
+    if (looksLikeQuotaBanner(node)) return hideNode(node, "quota-banner");
+    if (looksLikeUsageCard(node)) return hideNode(node, "usage-card");
+    return false;
+  }
+
+  function scanSubtree(root) {
+    if (!isElement(root)) return false;
+    state.scans += 1;
+    for (const node of collectCandidates(root)) classifyCandidate(node);
+    return true;
+  }
+
+  function scan(root = document.body || document.documentElement) {
+    if (!isElement(root)) return false;
+    installStyle();
+    return scanSubtree(root);
+  }
+
+  function isCandidate(node) {
+    return isElement(node) && CANDIDATE_SELECTOR_GROUPS.some((selector) => node.matches(selector));
+  }
+
+  function isMutationBoundary(node) {
+    if (!isElement(node)) return true;
+    if (node === document.body || node === document.documentElement) return true;
+    if (node.matches("[data-codex-composer-root]")) return true;
+    return node.matches(MESSAGE_CONTENT_SELECTOR);
+  }
+
+  function scanMutationRoot(root) {
+    if (!isElement(root) || root === document.body || root === document.documentElement) return;
+    scanSubtree(root);
+
+    for (let ancestor = root.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      if (isMutationBoundary(ancestor)) break;
+      if (isCandidate(ancestor)) classifyCandidate(ancestor);
     }
   }
 
-  function scheduleScan(delay = 80) {
-    if (state.timer) return;
-    state.timer = window.setTimeout(scan, delay);
+  function flushPendingRoots() {
+    state.timer = 0;
+    const roots = new Set(state.pendingRoots);
+    state.pendingRoots.clear();
+    if (!roots.size) return;
+
+    for (const root of roots) {
+      let parent = root.parentElement;
+      while (parent && !roots.has(parent)) parent = parent.parentElement;
+      if (!parent) scanMutationRoot(root);
+    }
+  }
+
+  function queueRoot(root) {
+    if (!isElement(root) || root === document.body || root === document.documentElement) return;
+    state.pendingRoots.add(root);
+    if (!state.timer) state.timer = window.setTimeout(flushPendingRoots, 80);
   }
 
   function installObserver() {
     const root = document.body || document.documentElement;
-    if (!root) return false;
+    if (!isElement(root)) return false;
+    if (state.observer) return true;
 
     state.observer = new MutationObserver((mutations) => {
-      if (!mutations.some((mutation) => mutation.addedNodes.length || mutation.type === "characterData")) return;
-      scheduleScan();
+      for (const mutation of mutations) {
+        if (mutation.type === "characterData") {
+          queueRoot(mutation.target?.parentElement);
+          continue;
+        }
+        if (mutation.type !== "childList") continue;
+        for (const added of mutation.addedNodes || []) {
+          queueRoot(isElement(added) ? added : added.parentElement);
+        }
+      }
     });
     state.observer.observe(root, {
       childList: true,
@@ -203,17 +266,32 @@
     return true;
   }
 
+  function start() {
+    const root = document.body || document.documentElement;
+    if (!document.documentElement || !isElement(root)) return false;
+
+    installStyle();
+    scanSubtree(root);
+    installObserver();
+    return true;
+  }
+
   function destroy() {
     if (state.timer) window.clearTimeout(state.timer);
     state.timer = 0;
+    state.pendingRoots.clear();
     state.observer?.disconnect();
     state.observer = null;
-    for (const node of state.hidden) {
-      node.removeAttribute(HIDDEN_ATTR);
+    if (state.readyHandler) {
+      document.removeEventListener("DOMContentLoaded", state.readyHandler);
+      state.readyHandler = null;
     }
-    state.hidden.clear();
+    for (const node of document.querySelectorAll(`[${HIDDEN_ATTR}], [${HIDDEN_KIND_ATTR}]`)) {
+      node.removeAttribute(HIDDEN_ATTR);
+      node.removeAttribute(HIDDEN_KIND_ATTR);
+    }
     document.getElementById(STYLE_ID)?.remove();
-    if (window[API_KEY]?.version === SCRIPT_VERSION) {
+    if (window[API_KEY]?.version === SCRIPT_VERSION && window[API_KEY]?.state === state) {
       delete window[API_KEY];
     }
   }
@@ -225,12 +303,13 @@
     destroy,
   };
 
-  installStyle();
-  if (!installObserver()) {
-    document.addEventListener("DOMContentLoaded", () => {
-      installObserver();
-      scheduleScan(0);
-    }, { once: true });
+  if (!start()) {
+    state.readyHandler = () => {
+      const handler = state.readyHandler;
+      state.readyHandler = null;
+      if (handler) document.removeEventListener("DOMContentLoaded", handler);
+      start();
+    };
+    document.addEventListener("DOMContentLoaded", state.readyHandler, { once: true });
   }
-  scheduleScan(0);
 })();
