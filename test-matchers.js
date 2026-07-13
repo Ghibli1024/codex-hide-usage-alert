@@ -4,6 +4,8 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync("hide-usage-alert.js", "utf8");
+const API_KEY = "__codexPlusHideUsageAlert";
+const STYLE_ID = "codex-plus-hide-usage-alert-style";
 const HIDDEN_ATTR = "data-codex-plus-hidden-usage-alert";
 const HIDDEN_KIND_ATTR = `${HIDDEN_ATTR}-kind`;
 
@@ -24,7 +26,17 @@ const mergedQuotaAlert = "你的 Codex 和工作使用额度已用完 升级至 
 const legacyUsageCard = "剩余 0% 使用量 重置频率 每周 下次重置时间 2026年7月20日 08:00 升级";
 
 function descendantsOf(root) {
-  return root.children.flatMap((child) => [child, ...descendantsOf(child)]);
+  return (root?.children || []).flatMap((child) =>
+    child.nodeType === 1 ? [child, ...descendantsOf(child)] : []
+  );
+}
+
+function subtreeAccessReads(root) {
+  return [root, ...descendantsOf(root)].reduce((total, node) => total + node.accessReads, 0);
+}
+
+function styleCount(document) {
+  return document.querySelectorAll("style").filter((style) => style.id === STYLE_ID).length;
 }
 
 function matchesAttribute(element, selector) {
@@ -75,6 +87,10 @@ class FakeElement {
     this.children = [];
     this._text = String(text);
     this.layoutReads = 0;
+    this.matchesReads = 0;
+    this.queryReads = 0;
+    this.textReads = 0;
+    this.attributeReads = 0;
     children.forEach((child) => this.appendChild(child));
   }
 
@@ -95,6 +111,7 @@ class FakeElement {
   }
 
   get textContent() {
+    this.textReads += 1;
     return [this._text, ...this.children.map((child) => child.textContent)].filter(Boolean).join(" ");
   }
 
@@ -120,10 +137,12 @@ class FakeElement {
   }
 
   getAttribute(name) {
+    this.attributeReads += 1;
     return this.attributes.has(name) ? this.attributes.get(name) : null;
   }
 
   hasAttribute(name) {
+    this.attributeReads += 1;
     return this.attributes.has(name);
   }
 
@@ -136,6 +155,7 @@ class FakeElement {
   }
 
   matches(selector) {
+    this.matchesReads += 1;
     return matchesSelector(this, selector);
   }
 
@@ -147,21 +167,57 @@ class FakeElement {
   }
 
   querySelector(selector) {
-    return this.querySelectorAll(selector)[0] || null;
+    this.queryReads += 1;
+    return descendantsOf(this).find((node) => node.matches(selector)) || null;
   }
 
   querySelectorAll(selector) {
+    this.queryReads += 1;
     return descendantsOf(this).filter((node) => node.matches(selector));
+  }
+
+  resetAccessCounts({ subtree = false } = {}) {
+    this.matchesReads = 0;
+    this.queryReads = 0;
+    this.layoutReads = 0;
+    this.textReads = 0;
+    this.attributeReads = 0;
+    if (subtree) descendantsOf(this).forEach((node) => node.resetAccessCounts());
+  }
+
+  get accessReads() {
+    return (
+      this.matchesReads +
+      this.queryReads +
+      this.textReads +
+      this.attributeReads +
+      this.layoutReads
+    );
   }
 }
 
-function createFakeDocument(documentElement, body) {
-  const listeners = new Map();
-  const allElements = () => [documentElement, ...descendantsOf(documentElement)];
+class FakeText {
+  constructor(text = "") {
+    this.nodeType = 3;
+    this.parentElement = null;
+    this._text = String(text);
+  }
 
-  return {
+  get textContent() {
+    return this._text;
+  }
+
+  set textContent(value) {
+    this._text = String(value || "");
+  }
+}
+
+function createFakeDocument(documentElement = null, body = null) {
+  const listeners = new Map();
+  const document = {
     body,
     documentElement,
+    readyState: documentElement ? "complete" : "loading",
     createElement(tagName) {
       return new FakeElement(tagName);
     },
@@ -174,18 +230,34 @@ function createFakeDocument(documentElement, body) {
     querySelectorAll(selector) {
       return allElements().filter((element) => element.matches(selector));
     },
-    addEventListener(event, callback) {
+    addEventListener(event, callback, options = {}) {
       const callbacks = listeners.get(event) || [];
-      callbacks.push(callback);
+      callbacks.push({ callback, once: !!options.once });
       listeners.set(event, callbacks);
     },
     removeEventListener(event, callback) {
-      listeners.set(event, (listeners.get(event) || []).filter((item) => item !== callback));
+      listeners.set(
+        event,
+        (listeners.get(event) || []).filter((item) => item.callback !== callback)
+      );
     },
     fire(event) {
-      for (const callback of listeners.get(event) || []) callback();
+      if (event === "DOMContentLoaded") this.readyState = "interactive";
+      for (const item of [...(listeners.get(event) || [])]) {
+        if (item.once) this.removeEventListener(event, item.callback);
+        item.callback();
+      }
+    },
+    listenerCount(event) {
+      return (listeners.get(event) || []).length;
     },
   };
+  const allElements = () =>
+    document.documentElement
+      ? [document.documentElement, ...descendantsOf(document.documentElement)]
+      : [];
+
+  return document;
 }
 
 function createFakeWindow() {
@@ -203,6 +275,9 @@ function createFakeWindow() {
     clearTimeout(id) {
       timers.delete(id);
     },
+    get pendingTimerCount() {
+      return timers.size;
+    },
     flushTimers() {
       let rounds = 0;
       while (timers.size) {
@@ -215,7 +290,7 @@ function createFakeWindow() {
   };
 }
 
-function createEnvironment(body) {
+function createEnvironment(body = null, { autoRun = true, topLevel = true } = {}) {
   const observers = [];
 
   class FakeMutationObserver {
@@ -225,7 +300,15 @@ function createEnvironment(body) {
       observers.push(this);
     }
 
-    observe() {
+    observe(target, options) {
+      if (!target || typeof target.nodeType !== "number") {
+        throw new TypeError("MutationObserver target must be a Node");
+      }
+      if (!options || !(options.childList || options.attributes || options.characterData)) {
+        throw new TypeError("MutationObserver options must observe at least one mutation type");
+      }
+      this.target = target;
+      this.options = { ...options };
       this.connected = true;
     }
 
@@ -238,12 +321,12 @@ function createEnvironment(body) {
     }
   }
 
-  const documentElement = new FakeElement("html", { children: [body] });
+  const documentElement = body ? new FakeElement("html", { children: [body] }) : null;
   const document = createFakeDocument(documentElement, body);
   const window = createFakeWindow();
   window.window = window;
   window.self = window;
-  window.top = window;
+  window.top = topLevel ? window : {};
 
   const context = {
     Node: { ELEMENT_NODE: 1 },
@@ -252,9 +335,29 @@ function createEnvironment(body) {
     window,
   };
 
-  vm.runInNewContext(source, context);
-  window.flushTimers();
-  return { context, document, observers, window };
+  function runScript() {
+    return vm.runInNewContext(source, context);
+  }
+
+  function attachBody(nextBody) {
+    const nextDocumentElement = new FakeElement("html", { children: [nextBody] });
+    document.body = nextBody;
+    document.documentElement = nextDocumentElement;
+    return nextDocumentElement;
+  }
+
+  const environment = { attachBody, context, document, observers, runScript, window };
+  Object.defineProperty(environment, "activeObserverCount", {
+    get() {
+      return observers.filter((observer) => observer.connected).length;
+    },
+  });
+
+  if (autoRun) {
+    runScript();
+    window.flushTimers();
+  }
+  return environment;
 }
 
 function quotaAlert(text, { tagName = "aside", attrs = {}, children = [] } = {}) {
@@ -401,4 +504,193 @@ test("does not read layout for non-quota text", () => {
   createEnvironment(new FakeElement("body", { children: [candidate] }));
 
   assert.equal(candidate.layoutReads, 0);
+});
+
+test("scans only the added childList subtree", () => {
+  const unrelated = new FakeElement("section", {
+    children: [new FakeElement("div", { text: "Existing project activity" })],
+  });
+  const body = new FakeElement("body", { children: [unrelated] });
+  const environment = createEnvironment(body);
+  unrelated.resetAccessCounts({ subtree: true });
+
+  const alert = quotaAlert(newOutOfMessagesAlert, { attrs: { role: "alert" } });
+  body.appendChild(alert);
+  environment.observers.find((observer) => observer.connected).emit([
+    { type: "childList", target: body, addedNodes: [alert] },
+  ]);
+  environment.window.flushTimers();
+
+  assert.equal(alert.getAttribute(HIDDEN_ATTR), "true");
+  assert.equal(subtreeAccessReads(unrelated), 0, "unrelated existing DOM must not be rescanned");
+});
+
+test("rescans a characterData parent and coalesces mutation timers", () => {
+  const text = new FakeText("Project activity is available.");
+  const button = new FakeElement("button", { text: "升级至 Plus" });
+  const alert = new FakeElement("aside", {
+    attrs: { role: "alert" },
+    rect: { width: 720, height: 80 },
+    children: [text, button],
+  });
+  const environment = createEnvironment(new FakeElement("body", { children: [alert] }));
+  assert.equal(alert.getAttribute(HIDDEN_ATTR), null);
+
+  text.textContent = newOutOfMessagesAlert;
+  environment.observers.find((observer) => observer.connected).emit([
+    { type: "characterData", target: text, addedNodes: [] },
+    { type: "characterData", target: text, addedNodes: [] },
+  ]);
+
+  assert.equal(environment.window.pendingTimerCount, 1);
+  environment.window.flushTimers();
+  assert.equal(alert.getAttribute(HIDDEN_ATTR), "true");
+});
+
+test("reinjects with one active observer and one style", () => {
+  const environment = createEnvironment(new FakeElement("body"));
+
+  environment.runScript();
+  environment.window.flushTimers();
+
+  assert.equal(environment.activeObserverCount, 1);
+  assert.equal(styleCount(environment.document), 1);
+});
+
+test("manual scan is idempotent", () => {
+  const alert = quotaAlert(newOutOfMessagesAlert);
+  const environment = createEnvironment(new FakeElement("body", { children: [alert] }));
+  const api = environment.window[API_KEY];
+  const matches = api.state.matches;
+
+  api.scan();
+  api.scan();
+
+  assert.equal(api.state.matches, matches);
+  assert.equal(environment.document.querySelectorAll(`[${HIDDEN_ATTR}="true"]`).length, 1);
+  assert.equal(styleCount(environment.document), 1);
+});
+
+test("destroy removes hidden and kind markers, including stale markers", () => {
+  const tracked = quotaAlert(newOutOfMessagesAlert);
+  const body = new FakeElement("body", { children: [tracked] });
+  const environment = createEnvironment(body);
+  const stale = new FakeElement("div", {
+    attrs: { [HIDDEN_ATTR]: "true", [HIDDEN_KIND_ATTR]: "quota-banner" },
+  });
+  const kindOnly = new FakeElement("div", {
+    attrs: { [HIDDEN_KIND_ATTR]: "usage-card" },
+  });
+  body.appendChild(stale);
+  body.appendChild(kindOnly);
+
+  environment.window[API_KEY].destroy();
+
+  const markerState = [tracked, stale, kindOnly].map((node) => ({
+    hidden: node.getAttribute(HIDDEN_ATTR),
+    kind: node.getAttribute(HIDDEN_KIND_ATTR),
+  }));
+  assert.deepEqual(markerState, [
+    { hidden: null, kind: null },
+    { hidden: null, kind: null },
+    { hidden: null, kind: null },
+  ]);
+});
+
+test("destroy stops the runtime and remains safe when called twice", () => {
+  const body = new FakeElement("body");
+  const environment = createEnvironment(body);
+  const api = environment.window[API_KEY];
+  const destroy = api.destroy;
+  const added = quotaAlert(newOutOfMessagesAlert);
+  body.appendChild(added);
+  environment.observers.find((observer) => observer.connected).emit([
+    { type: "childList", target: body, addedNodes: [added] },
+  ]);
+  assert.equal(environment.window.pendingTimerCount, 1);
+
+  destroy();
+
+  assert.deepEqual(
+    {
+      activeObservers: environment.activeObserverCount,
+      apiPresent: Object.hasOwn(environment.window, API_KEY),
+      pendingTimers: environment.window.pendingTimerCount,
+      styles: styleCount(environment.document),
+    },
+    { activeObservers: 0, apiPresent: false, pendingTimers: 0, styles: 0 }
+  );
+  assert.doesNotThrow(() => destroy());
+});
+
+test("does not retain persistent DOM Sets in public API state", () => {
+  const environment = createEnvironment(new FakeElement("body"));
+  const state = environment.window[API_KEY].state;
+  const persistentSetKeys = Object.entries(state)
+    .filter(
+      ([key, value]) =>
+        key !== "pendingRoots" && Object.prototype.toString.call(value) === "[object Set]"
+    )
+    .map(([key]) => key);
+
+  assert.deepEqual(persistentSetKeys, []);
+  if (Object.hasOwn(state, "pendingRoots")) assert.equal(state.pendingRoots.size, 0);
+});
+
+test("defers initialization until document roots exist and starts once", () => {
+  const environment = createEnvironment(null, { autoRun: false });
+
+  assert.doesNotThrow(() => environment.runScript());
+  assert.ok(environment.window[API_KEY]);
+  assert.equal(environment.activeObserverCount, 0);
+  assert.equal(styleCount(environment.document), 0);
+
+  environment.attachBody(new FakeElement("body"));
+  environment.document.fire("DOMContentLoaded");
+  environment.document.fire("DOMContentLoaded");
+  environment.window.flushTimers();
+
+  assert.equal(environment.activeObserverCount, 1);
+  assert.equal(styleCount(environment.document), 1);
+  assert.equal(environment.document.listenerCount("DOMContentLoaded"), 0);
+});
+
+test("destroy before DOMContentLoaded cancels deferred startup", () => {
+  const environment = createEnvironment(null, { autoRun: false });
+  assert.doesNotThrow(() => environment.runScript());
+  const destroy = environment.window[API_KEY].destroy;
+
+  destroy();
+  environment.attachBody(new FakeElement("body"));
+  environment.document.fire("DOMContentLoaded");
+  environment.window.flushTimers();
+
+  assert.deepEqual(
+    {
+      activeObservers: environment.activeObserverCount,
+      apiPresent: Object.hasOwn(environment.window, API_KEY),
+      pendingTimers: environment.window.pendingTimerCount,
+      styles: styleCount(environment.document),
+    },
+    { activeObservers: 0, apiPresent: false, pendingTimers: 0, styles: 0 }
+  );
+});
+
+test("does not initialize inside a child frame", () => {
+  const environment = createEnvironment(new FakeElement("body"), {
+    autoRun: false,
+    topLevel: false,
+  });
+
+  environment.runScript();
+  environment.window.flushTimers();
+
+  assert.deepEqual(
+    {
+      activeObservers: environment.activeObserverCount,
+      apiPresent: Object.hasOwn(environment.window, API_KEY),
+      styles: styleCount(environment.document),
+    },
+    { activeObservers: 0, apiPresent: false, styles: 0 }
+  );
 });
