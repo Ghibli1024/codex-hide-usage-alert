@@ -43,6 +43,7 @@
 ## 开发文档
 
 - `docs/superpowers/specs/2026-07-13-hide-usage-alert-design.md`：0.1.4 的 composer 防误伤、增量扫描、测试与发布设计。
+- `docs/superpowers/plans/2026-07-13-hide-usage-alert-implementation.md`：0.1.4 的 TDD 实施、三处同步与实机验收步骤。
 
 ## 安装
 
