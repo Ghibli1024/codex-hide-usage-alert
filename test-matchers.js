@@ -1,7 +1,10 @@
-const fs = require("fs");
-const vm = require("vm");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const test = require("node:test");
+const vm = require("node:vm");
 
 const source = fs.readFileSync("hide-usage-alert.js", "utf8");
+const HIDDEN_ATTR = "data-codex-plus-hidden-usage-alert";
 
 function loadRegex(name) {
   const match = source.match(new RegExp(`const\\s+${name}\\s*=\\s*([\\s\\S]*?);`));
@@ -45,41 +48,90 @@ const cases = [
   },
 ];
 
-let failed = false;
-
 for (const item of cases) {
-  const banner = quotaBannerRe.test(item.text);
-  const reset = quotaResetRe.test(item.text);
-  const action = actionTextRe.test(item.text);
+  test(item.name, () => {
+    assert.equal(quotaBannerRe.test(item.text), item.banner);
+    assert.equal(quotaResetRe.test(item.text), item.reset);
+    assert.equal(actionTextRe.test(item.text), item.action);
+  });
+}
 
-  if (banner !== item.banner || reset !== item.reset || action !== item.action) {
-    failed = true;
-    console.error(`FAIL ${item.name}`);
-    console.error(`  expected banner=${item.banner}, reset=${item.reset}, action=${item.action}`);
-    console.error(`  actual   banner=${banner}, reset=${reset}, action=${action}`);
+function descendantsOf(root) {
+  return root.children.flatMap((child) => [child, ...descendantsOf(child)]);
+}
+
+function matchesAttribute(element, selector) {
+  const match = selector.match(
+    /^\[([^\s~|^$*=\]]+)\s*(?:(\*=|=)\s*(?:"([^"]*)"|'([^']*)'|([^\s]+))\s*(i)?)?\]$/
+  );
+  if (!match) return false;
+
+  const [, name, operator, doubleQuoted, singleQuoted, bare, caseInsensitive] = match;
+  if (!element.hasAttribute(name)) return false;
+  if (!operator) return true;
+
+  const expected = doubleQuoted ?? singleQuoted ?? bare ?? "";
+  let actual = element.getAttribute(name);
+  if (caseInsensitive) {
+    actual = actual.toLowerCase();
+    return operator === "="
+      ? actual === expected.toLowerCase()
+      : actual.includes(expected.toLowerCase());
   }
+  return operator === "=" ? actual === expected : actual.includes(expected);
+}
+
+function matchesSelector(element, selector) {
+  return selector.split(",").some((part) => {
+    const simple = part.trim();
+    if (!simple) return false;
+    if (simple.startsWith("[")) return matchesAttribute(element, simple);
+    return element.tagName === simple.toUpperCase();
+  });
 }
 
 class FakeElement {
-  constructor({ text = "", rect = {}, children = [] } = {}) {
+  constructor(tagName = "div", { text = "", attrs = {}, rect = {}, children = [] } = {}) {
     this.nodeType = 1;
-    this.innerText = text;
-    this.textContent = text;
+    this.tagName = tagName.toUpperCase();
+    this.parentElement = null;
+    this.attributes = new Map(Object.entries(attrs).map(([key, value]) => [key, String(value)]));
     this.rect = {
       width: 360,
-      height: 160,
+      height: 120,
       top: 600,
-      bottom: 760,
+      bottom: 720,
       left: 700,
       right: 1060,
       ...rect,
     };
-    this.children = children;
-    this.parentElement = null;
-    this.attributes = new Map();
-    for (const child of children) {
-      child.parentElement = this;
-    }
+    this.children = [];
+    this._text = String(text);
+    children.forEach((child) => this.appendChild(child));
+  }
+
+  get id() {
+    return this.getAttribute("id") || "";
+  }
+
+  set id(value) {
+    this.setAttribute("id", value);
+  }
+
+  get innerText() {
+    return this.textContent;
+  }
+
+  set innerText(value) {
+    this._text = String(value || "");
+  }
+
+  get textContent() {
+    return [this._text, ...this.children.map((child) => child.textContent)].filter(Boolean).join(" ");
+  }
+
+  set textContent(value) {
+    this._text = String(value || "");
   }
 
   appendChild(child) {
@@ -88,27 +140,22 @@ class FakeElement {
     return child;
   }
 
+  remove() {
+    if (!this.parentElement) return;
+    this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+    this.parentElement = null;
+  }
+
   getBoundingClientRect() {
     return this.rect;
   }
 
-  closest() {
-    return null;
-  }
-
-  querySelector() {
-    return null;
-  }
-
-  querySelectorAll(selector) {
-    if (selector.includes("button")) {
-      return this.children.filter((child) => child.tagName === "BUTTON" || child.getAttribute("role") === "button");
-    }
-    return [];
-  }
-
   getAttribute(name) {
-    return this.attributes.get(name) || null;
+    return this.attributes.has(name) ? this.attributes.get(name) : null;
+  }
+
+  hasAttribute(name) {
+    return this.attributes.has(name);
   }
 
   setAttribute(name, value) {
@@ -118,62 +165,165 @@ class FakeElement {
   removeAttribute(name) {
     this.attributes.delete(name);
   }
+
+  matches(selector) {
+    return matchesSelector(this, selector);
+  }
+
+  closest(selector) {
+    for (let node = this; node; node = node.parentElement) {
+      if (node.matches(selector)) return node;
+    }
+    return null;
+  }
+
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] || null;
+  }
+
+  querySelectorAll(selector) {
+    return descendantsOf(this).filter((node) => node.matches(selector));
+  }
 }
 
-function assertSubagentQuotaCardHidden() {
-  const button = new FakeElement({ text: "增加额度", rect: { width: 80, height: 32 } });
-  button.tagName = "BUTTON";
+function createFakeDocument(documentElement, body) {
+  const listeners = new Map();
+  const allElements = () => [documentElement, ...descendantsOf(documentElement)];
 
-  const quotaCard = new FakeElement({
+  return {
+    body,
+    documentElement,
+    createElement(tagName) {
+      return new FakeElement(tagName);
+    },
+    getElementById(id) {
+      return allElements().find((element) => element.id === id) || null;
+    },
+    querySelector(selector) {
+      return this.querySelectorAll(selector)[0] || null;
+    },
+    querySelectorAll(selector) {
+      return allElements().filter((element) => element.matches(selector));
+    },
+    addEventListener(event, callback) {
+      const callbacks = listeners.get(event) || [];
+      callbacks.push(callback);
+      listeners.set(event, callbacks);
+    },
+    removeEventListener(event, callback) {
+      listeners.set(event, (listeners.get(event) || []).filter((item) => item !== callback));
+    },
+    fire(event) {
+      for (const callback of listeners.get(event) || []) callback();
+    },
+  };
+}
+
+function createFakeWindow() {
+  let nextTimerId = 1;
+  const timers = new Map();
+
+  return {
+    innerHeight: 900,
+    innerWidth: 1200,
+    setTimeout(callback) {
+      const id = nextTimerId++;
+      timers.set(id, callback);
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    flushTimers() {
+      let rounds = 0;
+      while (timers.size) {
+        if (++rounds > 100) throw new Error("Fake timer queue did not settle");
+        const pending = [...timers.values()];
+        timers.clear();
+        pending.forEach((callback) => callback());
+      }
+    },
+  };
+}
+
+function createEnvironment(body) {
+  const observers = [];
+
+  class FakeMutationObserver {
+    constructor(callback) {
+      this.callback = callback;
+      this.connected = false;
+      observers.push(this);
+    }
+
+    observe() {
+      this.connected = true;
+    }
+
+    disconnect() {
+      this.connected = false;
+    }
+
+    emit(mutations) {
+      if (this.connected) this.callback(mutations);
+    }
+  }
+
+  const documentElement = new FakeElement("html", { children: [body] });
+  const document = createFakeDocument(documentElement, body);
+  const window = createFakeWindow();
+  window.window = window;
+  window.self = window;
+  window.top = window;
+
+  const context = {
+    Node: { ELEMENT_NODE: 1 },
+    MutationObserver: FakeMutationObserver,
+    document,
+    window,
+  };
+
+  vm.runInNewContext(source, context);
+  window.flushTimers();
+  return { context, document, observers, window };
+}
+
+function quotaAlert(text) {
+  const button = new FakeElement("button", { text: "增加额度", rect: { width: 80, height: 32 } });
+  return new FakeElement("aside", { text, rect: { width: 720, height: 80 }, children: [button] });
+}
+
+test("hides the subagent quota card", () => {
+  const button = new FakeElement("button", { text: "增加额度", rect: { width: 80, height: 32 } });
+  const quotaCard = new FakeElement("div", {
     text: subagentQuotaCard,
     rect: { width: 360, height: 160 },
     children: [button],
   });
-  const body = new FakeElement({ children: [quotaCard] });
-  body.querySelectorAll = () => [quotaCard];
+  createEnvironment(new FakeElement("body", { children: [quotaCard] }));
+  assert.equal(quotaCard.getAttribute(HIDDEN_ATTR), "true");
+});
 
-  const context = {
-    Node: { ELEMENT_NODE: 1 },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
-    },
-    document: {
-      body,
-      documentElement: new FakeElement(),
-      createElement() {
-        return new FakeElement();
-      },
-      getElementById() {
-        return null;
-      },
-      addEventListener(_event, callback) {
-        callback();
-      },
-    },
-    window: {
-      innerHeight: 900,
-      innerWidth: 1200,
-      setTimeout(callback) {
-        callback();
-        return 1;
-      },
-      clearTimeout() {},
-    },
-  };
+test("hides the quota aside without hiding its composer sibling or shared layout", () => {
+  const alert = quotaAlert(subagentQuotaCard);
+  const composer = new FakeElement("div", {
+    attrs: { "data-codex-composer": "true", contenteditable: "true" },
+    rect: { width: 720, height: 110 },
+  });
+  const layout = new FakeElement("div", {
+    children: [alert, composer],
+    rect: { width: 760, height: 210 },
+  });
+  const composerRoot = new FakeElement("div", {
+    attrs: { "data-codex-composer-root": "true" },
+    children: [layout],
+    rect: { width: 800, height: 240 },
+  });
 
-  vm.runInNewContext(source, context);
+  createEnvironment(new FakeElement("body", { children: [composerRoot] }));
 
-  if (quotaCard.getAttribute("data-codex-plus-hidden-usage-alert") !== "true") {
-    failed = true;
-    console.error("FAIL hides the subagent quota card");
-  }
-}
-
-assertSubagentQuotaCardHidden();
-
-if (failed) {
-  process.exit(1);
-}
-
-console.log(`PASS ${cases.length} matcher case(s) and 1 DOM scan case`);
+  assert.equal(layout.getAttribute(HIDDEN_ATTR), null, "shared layout must not be hidden");
+  assert.equal(composerRoot.getAttribute(HIDDEN_ATTR), null, "composer root must not be hidden");
+  assert.equal(composer.getAttribute(HIDDEN_ATTR), null, "composer must not be hidden");
+  assert.equal(alert.getAttribute(HIDDEN_ATTR), "true", "quota aside should be hidden directly");
+});
