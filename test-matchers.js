@@ -31,6 +31,8 @@ const subagentQuotaCard = [
   "增加额度",
 ].join(" ");
 
+const mergedQuotaAlert = "你的 Codex 和工作使用额度已用完 升级至 Pro 重置使用量";
+
 const cases = [
   {
     name: "matches the new Codex out-of-messages alert",
@@ -107,6 +109,7 @@ class FakeElement {
     };
     this.children = [];
     this._text = String(text);
+    this.layoutReads = 0;
     children.forEach((child) => this.appendChild(child));
   }
 
@@ -147,6 +150,7 @@ class FakeElement {
   }
 
   getBoundingClientRect() {
+    this.layoutReads += 1;
     return this.rect;
   }
 
@@ -288,10 +292,24 @@ function createEnvironment(body) {
   return { context, document, observers, window };
 }
 
-function quotaAlert(text) {
+function quotaAlert(text, { tagName = "aside", attrs = {}, children = [] } = {}) {
   const button = new FakeElement("button", { text: "增加额度", rect: { width: 80, height: 32 } });
-  return new FakeElement("aside", { text, rect: { width: 720, height: 80 }, children: [button] });
+  return new FakeElement(tagName, {
+    text,
+    attrs,
+    rect: { width: 720, height: 80 },
+    children: [...children, button],
+  });
 }
+
+const protectedSurfaces = [
+  { selector: "[data-codex-composer-root]", tagName: "div", attrs: { "data-codex-composer-root": "true" } },
+  { selector: "[data-codex-composer]", tagName: "div", attrs: { "data-codex-composer": "true" } },
+  { selector: "[contenteditable]", tagName: "div", attrs: { contenteditable: "true" } },
+  { selector: "textarea", tagName: "textarea", attrs: {} },
+  { selector: "input", tagName: "input", attrs: {} },
+  { selector: "form", tagName: "form", attrs: {} },
+];
 
 test("hides the subagent quota card", () => {
   const button = new FakeElement("button", { text: "增加额度", rect: { width: 80, height: 32 } });
@@ -326,4 +344,45 @@ test("hides the quota aside without hiding its composer sibling or shared layout
   assert.equal(composerRoot.getAttribute(HIDDEN_ATTR), null, "composer root must not be hidden");
   assert.equal(composer.getAttribute(HIDDEN_ATTR), null, "composer must not be hidden");
   assert.equal(alert.getAttribute(HIDDEN_ATTR), "true", "quota aside should be hidden directly");
+});
+
+test("hides the merged Codex and work usage quota copy", () => {
+  const alert = quotaAlert(mergedQuotaAlert);
+
+  createEnvironment(new FakeElement("body", { children: [alert] }));
+
+  assert.equal(alert.getAttribute(HIDDEN_ATTR), "true");
+});
+
+for (const surface of protectedSurfaces) {
+  test(`does not hide a quota candidate that is ${surface.selector}`, () => {
+    const candidate = quotaAlert(subagentQuotaCard, {
+      tagName: surface.tagName,
+      attrs: { role: "alert", ...surface.attrs },
+    });
+
+    createEnvironment(new FakeElement("body", { children: [candidate] }));
+
+    assert.equal(candidate.getAttribute(HIDDEN_ATTR), null);
+  });
+
+  test(`does not hide a quota candidate containing ${surface.selector}`, () => {
+    const protectedChild = new FakeElement(surface.tagName, { attrs: surface.attrs });
+    const candidate = quotaAlert(subagentQuotaCard, { children: [protectedChild] });
+
+    createEnvironment(new FakeElement("body", { children: [candidate] }));
+
+    assert.equal(candidate.getAttribute(HIDDEN_ATTR), null);
+  });
+}
+
+test("does not read layout for non-quota text", () => {
+  const candidate = new FakeElement("aside", {
+    text: "Project activity is available and the editor is ready.",
+    rect: { width: 720, height: 80 },
+  });
+
+  createEnvironment(new FakeElement("body", { children: [candidate] }));
+
+  assert.equal(candidate.layoutReads, 0);
 });
