@@ -40,6 +40,10 @@
 - 诊断入口：脚本会暴露 `window.__codexPlusHideUsageAlert`，可用于手动执行 `scan()` 或 `destroy()`。
 - 作用范围：只影响前端显示层，不参与账号鉴权、请求发送、模型路由或 API Key 调用。
 
+## 开发文档
+
+- `docs/superpowers/specs/2026-07-13-hide-usage-alert-design.md`：0.1.4 的 composer 防误伤、增量扫描、测试与发布设计。
+
 ## 安装
 
 下载 `hide-usage-alert.js`，放进 Codex++ 的用户脚本目录。目录位置取决于系统：
