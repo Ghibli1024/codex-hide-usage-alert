@@ -5,18 +5,7 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync("hide-usage-alert.js", "utf8");
 const HIDDEN_ATTR = "data-codex-plus-hidden-usage-alert";
-
-function loadRegex(name) {
-  const match = source.match(new RegExp(`const\\s+${name}\\s*=\\s*([\\s\\S]*?);`));
-  if (!match) {
-    throw new Error(`Cannot find ${name}`);
-  }
-  return vm.runInNewContext(match[1]);
-}
-
-const quotaBannerRe = loadRegex("quotaBannerRe");
-const quotaResetRe = loadRegex("quotaResetRe");
-const actionTextRe = loadRegex("actionTextRe");
+const HIDDEN_KIND_ATTR = `${HIDDEN_ATTR}-kind`;
 
 const newOutOfMessagesAlert = [
   "You’re out of Codex messages",
@@ -32,31 +21,7 @@ const subagentQuotaCard = [
 ].join(" ");
 
 const mergedQuotaAlert = "你的 Codex 和工作使用额度已用完 升级至 Pro 重置使用量";
-
-const cases = [
-  {
-    name: "matches the new Codex out-of-messages alert",
-    text: newOutOfMessagesAlert,
-    banner: true,
-    reset: true,
-    action: true,
-  },
-  {
-    name: "matches the subagent quota card",
-    text: subagentQuotaCard,
-    banner: true,
-    reset: true,
-    action: true,
-  },
-];
-
-for (const item of cases) {
-  test(item.name, () => {
-    assert.equal(quotaBannerRe.test(item.text), item.banner);
-    assert.equal(quotaResetRe.test(item.text), item.reset);
-    assert.equal(actionTextRe.test(item.text), item.action);
-  });
-}
+const legacyUsageCard = "剩余 0% 使用量 重置频率 每周 下次重置时间 2026年7月20日 08:00 升级";
 
 function descendantsOf(root) {
   return root.children.flatMap((child) => [child, ...descendantsOf(child)]);
@@ -311,6 +276,39 @@ const protectedSurfaces = [
   { selector: "form", tagName: "form", attrs: {} },
 ];
 
+test("hides the English role=alert out-of-messages banner", () => {
+  const alert = quotaAlert(newOutOfMessagesAlert, { attrs: { role: "alert" } });
+
+  createEnvironment(new FakeElement("body", { children: [alert] }));
+
+  assert.equal(alert.getAttribute(HIDDEN_ATTR), "true");
+  assert.equal(alert.getAttribute(HIDDEN_KIND_ATTR), "quota-banner");
+});
+
+test("hides the legacy bottom div quota banner", () => {
+  const banner = quotaAlert(newOutOfMessagesAlert, { tagName: "div" });
+
+  createEnvironment(new FakeElement("body", { children: [banner] }));
+
+  assert.equal(banner.getAttribute(HIDDEN_ATTR), "true");
+  assert.equal(banner.getAttribute(HIDDEN_KIND_ATTR), "quota-banner");
+});
+
+test("hides the legacy role=status usage card", () => {
+  const upgrade = new FakeElement("button", { text: "升级", rect: { width: 80, height: 32 } });
+  const card = new FakeElement("div", {
+    text: legacyUsageCard,
+    attrs: { role: "status" },
+    rect: { width: 360, height: 160 },
+    children: [upgrade],
+  });
+
+  createEnvironment(new FakeElement("body", { children: [card] }));
+
+  assert.equal(card.getAttribute(HIDDEN_ATTR), "true");
+  assert.equal(card.getAttribute(HIDDEN_KIND_ATTR), "usage-card");
+});
+
 test("hides the subagent quota card", () => {
   const button = new FakeElement("button", { text: "增加额度", rect: { width: 80, height: 32 } });
   const quotaCard = new FakeElement("div", {
@@ -321,6 +319,24 @@ test("hides the subagent quota card", () => {
   createEnvironment(new FakeElement("body", { children: [quotaCard] }));
   assert.equal(quotaCard.getAttribute(HIDDEN_ATTR), "true");
 });
+
+for (const container of [
+  { name: "data-message-author-role", tagName: "div", attrs: { "data-message-author-role": "assistant" } },
+  { name: "article", tagName: "article", attrs: {} },
+]) {
+  test(`does not hide quoted quota copy inside ${container.name}`, () => {
+    const quote = quotaAlert(newOutOfMessagesAlert, { attrs: { role: "alert" } });
+    const message = new FakeElement(container.tagName, {
+      attrs: container.attrs,
+      children: [quote],
+    });
+
+    createEnvironment(new FakeElement("body", { children: [message] }));
+
+    assert.equal(message.getAttribute(HIDDEN_ATTR), null);
+    assert.equal(quote.getAttribute(HIDDEN_ATTR), null);
+  });
+}
 
 test("hides the quota aside without hiding its composer sibling or shared layout", () => {
   const alert = quotaAlert(subagentQuotaCard);
