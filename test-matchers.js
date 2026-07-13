@@ -125,6 +125,19 @@ class FakeElement {
     return child;
   }
 
+  contains(node) {
+    for (let current = node; current; current = current.parentElement) {
+      if (current === this) return true;
+    }
+    return false;
+  }
+
+  get isConnected() {
+    let root = this;
+    while (root.parentElement) root = root.parentElement;
+    return root.tagName === "HTML";
+  }
+
   remove() {
     if (!this.parentElement) return;
     this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
@@ -441,6 +454,19 @@ for (const container of [
   });
 }
 
+test("does not hide ancestors containing quoted quota copy", () => {
+  const quote = quotaAlert(newOutOfMessagesAlert, { attrs: { role: "alert" } });
+  const article = new FakeElement("article", { children: [quote] });
+  const section = new FakeElement("section", { children: [article] });
+  const outer = new FakeElement("div", { children: [section] });
+
+  createEnvironment(new FakeElement("body", { children: [outer] }));
+
+  for (const node of [outer, section, article, quote]) {
+    assert.equal(node.getAttribute(HIDDEN_ATTR), null);
+  }
+});
+
 test("hides the quota aside without hiding its composer sibling or shared layout", () => {
   const alert = quotaAlert(subagentQuotaCard);
   const composer = new FakeElement("div", {
@@ -523,6 +549,40 @@ test("scans only the added childList subtree", () => {
 
   assert.equal(alert.getAttribute(HIDDEN_ATTR), "true");
   assert.equal(subtreeAccessReads(unrelated), 0, "unrelated existing DOM must not be rescanned");
+});
+
+test("does not hide outer ancestors when a quoted message is added", () => {
+  const outer = new FakeElement("div");
+  const body = new FakeElement("body", { children: [outer] });
+  const environment = createEnvironment(body);
+  const quote = quotaAlert(newOutOfMessagesAlert, { attrs: { role: "alert" } });
+  const article = new FakeElement("article", { children: [quote] });
+
+  outer.appendChild(article);
+  environment.observers.find((observer) => observer.connected).emit([
+    { type: "childList", target: outer, addedNodes: [article] },
+  ]);
+  environment.window.flushTimers();
+
+  for (const node of [outer, article, quote]) {
+    assert.equal(node.getAttribute(HIDDEN_ATTR), null);
+  }
+});
+
+test("drops a detached pending mutation root", () => {
+  const body = new FakeElement("body");
+  const environment = createEnvironment(body);
+  const alert = quotaAlert(newOutOfMessagesAlert, { attrs: { role: "alert" } });
+
+  body.appendChild(alert);
+  environment.observers.find((observer) => observer.connected).emit([
+    { type: "childList", target: body, addedNodes: [alert] },
+  ]);
+  alert.remove();
+  assert.equal(alert.isConnected, false);
+  environment.window.flushTimers();
+
+  assert.equal(alert.getAttribute(HIDDEN_ATTR), null);
 });
 
 test("rescans a characterData parent and coalesces mutation timers", () => {

@@ -93,8 +93,11 @@
     return true;
   }
 
-  function insideConversationContent(node) {
-    return isElement(node) && !!node.closest(MESSAGE_CONTENT_SELECTOR);
+  function intersectsConversationContent(node) {
+    return isElement(node) && (
+      !!node.closest(MESSAGE_CONTENT_SELECTOR) ||
+      !!node.querySelector(MESSAGE_CONTENT_SELECTOR)
+    );
   }
 
   function hasAction(node, text) {
@@ -110,7 +113,7 @@
 
   function looksLikeQuotaBanner(node) {
     if (isProtectedSurface(node)) return false;
-    if (insideConversationContent(node)) return false;
+    if (intersectsConversationContent(node)) return false;
     const text = candidateText(node);
     if (text.length < 20 || text.length > 420) return false;
     if (!quotaBannerRe.test(text)) return false;
@@ -122,7 +125,7 @@
 
   function looksLikeUsageCard(node) {
     if (isProtectedSurface(node)) return false;
-    if (insideConversationContent(node)) return false;
+    if (intersectsConversationContent(node)) return false;
     const text = candidateText(node);
     if (text.length < 20 || text.length > 260) return false;
     if (!usageCardRe.test(text)) return false;
@@ -135,7 +138,7 @@
   function hideNode(node, kind) {
     if (!isElement(node) || node === document.body || node === document.documentElement) return false;
     if (node.getAttribute(HIDDEN_ATTR) === "true") return false;
-    if (isProtectedSurface(node) || insideConversationContent(node)) return false;
+    if (isProtectedSurface(node) || intersectsConversationContent(node)) return false;
     node.setAttribute(HIDDEN_ATTR, "true");
     node.setAttribute(HIDDEN_KIND_ATTR, kind);
     state.matches += 1;
@@ -215,6 +218,7 @@
   function scanMutationRoot(root) {
     if (!isElement(root) || root === document.body || root === document.documentElement) return;
     scanSubtree(root);
+    if (root.matches(MESSAGE_CONTENT_SELECTOR)) return;
 
     for (let ancestor = root.parentElement; ancestor; ancestor = ancestor.parentElement) {
       if (isMutationBoundary(ancestor)) break;
@@ -229,6 +233,7 @@
     if (!roots.size) return;
 
     for (const root of roots) {
+      if (!document.documentElement?.contains(root)) continue;
       let parent = root.parentElement;
       while (parent && !roots.has(parent)) parent = parent.parentElement;
       if (!parent) scanMutationRoot(root);
