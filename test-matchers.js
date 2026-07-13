@@ -303,7 +303,10 @@ function createFakeWindow() {
   };
 }
 
-function createEnvironment(body = null, { autoRun = true, topLevel = true } = {}) {
+function createEnvironment(
+  body = null,
+  { autoRun = true, documentElementReady = false, topLevel = true } = {}
+) {
   const observers = [];
 
   class FakeMutationObserver {
@@ -334,7 +337,9 @@ function createEnvironment(body = null, { autoRun = true, topLevel = true } = {}
     }
   }
 
-  const documentElement = body ? new FakeElement("html", { children: [body] }) : null;
+  const documentElement = body || documentElementReady
+    ? new FakeElement("html", { children: body ? [body] : [] })
+    : null;
   const document = createFakeDocument(documentElement, body);
   const window = createFakeWindow();
   window.window = window;
@@ -359,7 +364,21 @@ function createEnvironment(body = null, { autoRun = true, topLevel = true } = {}
     return nextDocumentElement;
   }
 
-  const environment = { attachBody, context, document, observers, runScript, window };
+  function mountBody(nextBody) {
+    if (!document.documentElement || document.body) {
+      throw new Error("mountBody requires an existing documentElement without a body");
+    }
+    document.documentElement.appendChild(nextBody);
+    document.body = nextBody;
+    for (const observer of observers) {
+      observer.emit([
+        { type: "childList", target: document.documentElement, addedNodes: [nextBody] },
+      ]);
+    }
+    return document.documentElement;
+  }
+
+  const environment = { attachBody, context, document, mountBody, observers, runScript, window };
   Object.defineProperty(environment, "activeObserverCount", {
     get() {
       return observers.filter((observer) => observer.connected).length;
@@ -408,6 +427,27 @@ test("hides the legacy bottom div quota banner", () => {
 
   assert.equal(banner.getAttribute(HIDDEN_ATTR), "true");
   assert.equal(banner.getAttribute(HIDDEN_KIND_ATTR), "quota-banner");
+});
+
+test("hides the smallest nested legacy quota card", () => {
+  const copy = new FakeElement("div", { text: newOutOfMessagesAlert });
+  const action = new FakeElement("button", { text: "Upgrade", rect: { width: 80, height: 32 } });
+  const card = new FakeElement("div", {
+    rect: { width: 720, height: 100 },
+    children: [copy, action],
+  });
+  const sibling = new FakeElement("div", { text: "Unrelated controls" });
+  const wrapper = new FakeElement("div", {
+    rect: { width: 760, height: 180 },
+    children: [card, sibling],
+  });
+
+  createEnvironment(new FakeElement("body", { children: [wrapper] }));
+
+  assert.equal(wrapper.getAttribute(HIDDEN_ATTR), null, "outer wrapper must remain visible");
+  assert.equal(card.getAttribute(HIDDEN_ATTR), "true", "the complete quota card should be hidden");
+  assert.equal(copy.getAttribute(HIDDEN_ATTR), null, "copy alone is not the complete alert surface");
+  assert.equal(sibling.getAttribute(HIDDEN_ATTR), null, "unrelated sibling must remain visible");
 });
 
 test("hides the legacy role=status usage card", () => {
@@ -569,6 +609,25 @@ test("does not hide outer ancestors when a quoted message is added", () => {
   }
 });
 
+test("does not cross an added message boundary to revalidate an outer marker", () => {
+  const outer = new FakeElement("div");
+  const body = new FakeElement("body", { children: [outer] });
+  const environment = createEnvironment(body);
+  outer.setAttribute(HIDDEN_ATTR, "true");
+  outer.setAttribute(HIDDEN_KIND_ATTR, "quota-banner");
+  const quote = quotaAlert(newOutOfMessagesAlert, { attrs: { role: "alert" } });
+  const article = new FakeElement("article", { children: [quote] });
+
+  outer.appendChild(article);
+  environment.observers.find((observer) => observer.connected).emit([
+    { type: "childList", target: outer, addedNodes: [article] },
+  ]);
+  environment.window.flushTimers();
+
+  assert.equal(outer.getAttribute(HIDDEN_ATTR), "true");
+  assert.equal(quote.getAttribute(HIDDEN_ATTR), null);
+});
+
 test("drops a detached pending mutation root", () => {
   const body = new FakeElement("body");
   const environment = createEnvironment(body);
@@ -607,6 +666,27 @@ test("rescans a characterData parent and coalesces mutation timers", () => {
   assert.equal(alert.getAttribute(HIDDEN_ATTR), "true");
 });
 
+test("revalidates a hidden alert when nested text stops matching", () => {
+  const text = new FakeText(newOutOfMessagesAlert);
+  const copy = new FakeElement("div", { children: [text] });
+  const button = new FakeElement("button", { text: "Upgrade" });
+  const alert = new FakeElement("aside", {
+    rect: { width: 720, height: 80 },
+    children: [copy, button],
+  });
+  const environment = createEnvironment(new FakeElement("body", { children: [alert] }));
+  assert.equal(alert.getAttribute(HIDDEN_ATTR), "true");
+
+  text.textContent = "Project activity is available and the editor is ready.";
+  environment.observers.find((observer) => observer.connected).emit([
+    { type: "characterData", target: text, addedNodes: [] },
+  ]);
+  environment.window.flushTimers();
+
+  assert.equal(alert.getAttribute(HIDDEN_ATTR), null);
+  assert.equal(alert.getAttribute(HIDDEN_KIND_ATTR), null);
+});
+
 test("reinjects with one active observer and one style", () => {
   const environment = createEnvironment(new FakeElement("body"));
 
@@ -615,6 +695,33 @@ test("reinjects with one active observer and one style", () => {
 
   assert.equal(environment.activeObserverCount, 1);
   assert.equal(styleCount(environment.document), 1);
+});
+
+test("scans a populated body mounted after documentElement", () => {
+  const environment = createEnvironment(null, { documentElementReady: true });
+  const alert = quotaAlert(newOutOfMessagesAlert);
+  const body = new FakeElement("body", { children: [alert] });
+
+  environment.mountBody(body);
+  environment.window.flushTimers();
+
+  assert.equal(alert.getAttribute(HIDDEN_ATTR), "true");
+});
+
+test("a stale API cannot destroy the current instance effects", () => {
+  const alert = quotaAlert(newOutOfMessagesAlert);
+  const environment = createEnvironment(new FakeElement("body", { children: [alert] }));
+  const staleApi = environment.window[API_KEY];
+
+  environment.runScript();
+  environment.window.flushTimers();
+  const currentApi = environment.window[API_KEY];
+  staleApi.destroy();
+
+  assert.equal(environment.window[API_KEY], currentApi);
+  assert.equal(environment.activeObserverCount, 1);
+  assert.equal(styleCount(environment.document), 1);
+  assert.equal(alert.getAttribute(HIDDEN_ATTR), "true");
 });
 
 test("manual scan is idempotent", () => {
@@ -655,6 +762,26 @@ test("destroy removes hidden and kind markers, including stale markers", () => {
     { hidden: null, kind: null },
     { hidden: null, kind: null },
   ]);
+});
+
+test("revalidates a detached stale marker when the node is reattached", () => {
+  const alert = quotaAlert(newOutOfMessagesAlert);
+  const body = new FakeElement("body", { children: [alert] });
+  const environment = createEnvironment(body);
+  const firstApi = environment.window[API_KEY];
+
+  alert.remove();
+  firstApi.destroy();
+  alert.textContent = "Project activity is available and the editor is ready.";
+  environment.runScript();
+  body.appendChild(alert);
+  environment.observers.find((observer) => observer.connected).emit([
+    { type: "childList", target: body, addedNodes: [alert] },
+  ]);
+  environment.window.flushTimers();
+
+  assert.equal(alert.getAttribute(HIDDEN_ATTR), null);
+  assert.equal(alert.getAttribute(HIDDEN_KIND_ATTR), null);
 });
 
 test("destroy stops the runtime and remains safe when called twice", () => {

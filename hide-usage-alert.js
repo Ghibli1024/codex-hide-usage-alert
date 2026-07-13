@@ -5,6 +5,7 @@
   const STYLE_ID = "codex-plus-hide-usage-alert-style";
   const HIDDEN_ATTR = "data-codex-plus-hidden-usage-alert";
   const HIDDEN_KIND_ATTR = `${HIDDEN_ATTR}-kind`;
+  const HIDDEN_MARKER_SELECTOR = `[${HIDDEN_ATTR}], [${HIDDEN_KIND_ATTR}]`;
   const SCRIPT_VERSION = "0.1.4";
   const PROTECTED_SURFACE_SELECTOR = [
     "[data-codex-composer-root]",
@@ -101,9 +102,11 @@
   }
 
   function hasAction(node, text) {
+    const actions = Array.from(node.querySelectorAll("button, a, [role='button']")).slice(0, 8);
+    if (!actions.length) return false;
+
     const actionableText = normalizeText(
-      Array.from(node.querySelectorAll("button, a, [role='button']"))
-        .slice(0, 8)
+      actions
         .map((item) => item.innerText || item.textContent || item.getAttribute("aria-label") || "")
         .join(" ")
     );
@@ -145,6 +148,16 @@
     return true;
   }
 
+  function clearHiddenMarkers(root) {
+    const clear = (node) => {
+      node.removeAttribute(HIDDEN_ATTR);
+      node.removeAttribute(HIDDEN_KIND_ATTR);
+    };
+
+    if (isElement(root) && root.matches(HIDDEN_MARKER_SELECTOR)) clear(root);
+    for (const node of root.querySelectorAll(HIDDEN_MARKER_SELECTOR)) clear(node);
+  }
+
   function installStyle() {
     if (!document.documentElement) return false;
     if (document.getElementById(STYLE_ID)) return true;
@@ -175,8 +188,9 @@
     };
 
     for (const selector of CANDIDATE_SELECTOR_GROUPS) {
-      if (root.matches(selector)) add(root);
-      for (const node of root.querySelectorAll(selector)) add(node);
+      const matches = Array.from(root.querySelectorAll(selector));
+      if (root.matches(selector)) matches.unshift(root);
+      for (let index = matches.length - 1; index >= 0; index -= 1) add(matches[index]);
     }
     return candidates;
   }
@@ -215,12 +229,23 @@
     return node.matches(MESSAGE_CONTENT_SELECTOR);
   }
 
-  function scanMutationRoot(root) {
-    if (!isElement(root) || root === document.body || root === document.documentElement) return;
-    scanSubtree(root);
-    if (root.matches(MESSAGE_CONTENT_SELECTOR)) return;
+  function markedMutationRoot(root) {
+    for (let node = root; node; node = node.parentElement) {
+      const boundary = isMutationBoundary(node);
+      if (node.matches(HIDDEN_MARKER_SELECTOR) && (node === root || !boundary)) return node;
+      if (boundary) break;
+    }
+    return root;
+  }
 
-    for (let ancestor = root.parentElement; ancestor; ancestor = ancestor.parentElement) {
+  function scanMutationRoot(root) {
+    if (!isElement(root) || root === document.documentElement) return;
+    const scanRoot = markedMutationRoot(root);
+    clearHiddenMarkers(scanRoot);
+    scanSubtree(scanRoot);
+    if (scanRoot === document.body || scanRoot.matches(MESSAGE_CONTENT_SELECTOR)) return;
+
+    for (let ancestor = scanRoot.parentElement; ancestor; ancestor = ancestor.parentElement) {
       if (isMutationBoundary(ancestor)) break;
       if (isCandidate(ancestor)) classifyCandidate(ancestor);
     }
@@ -241,7 +266,7 @@
   }
 
   function queueRoot(root) {
-    if (!isElement(root) || root === document.body || root === document.documentElement) return;
+    if (!isElement(root) || root === document.documentElement) return;
     state.pendingRoots.add(root);
     if (!state.timer) state.timer = window.setTimeout(flushPendingRoots, 80);
   }
@@ -282,6 +307,7 @@
   }
 
   function destroy() {
+    const ownsRuntime = window[API_KEY]?.state === state;
     if (state.timer) window.clearTimeout(state.timer);
     state.timer = 0;
     state.pendingRoots.clear();
@@ -291,12 +317,10 @@
       document.removeEventListener("DOMContentLoaded", state.readyHandler);
       state.readyHandler = null;
     }
-    for (const node of document.querySelectorAll(`[${HIDDEN_ATTR}], [${HIDDEN_KIND_ATTR}]`)) {
-      node.removeAttribute(HIDDEN_ATTR);
-      node.removeAttribute(HIDDEN_KIND_ATTR);
-    }
+    if (!ownsRuntime) return;
+    clearHiddenMarkers(document);
     document.getElementById(STYLE_ID)?.remove();
-    if (window[API_KEY]?.version === SCRIPT_VERSION && window[API_KEY]?.state === state) {
+    if (window[API_KEY]?.version === SCRIPT_VERSION) {
       delete window[API_KEY];
     }
   }
