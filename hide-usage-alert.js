@@ -6,7 +6,7 @@
   const HIDDEN_ATTR = "data-codex-plus-hidden-usage-alert";
   const HIDDEN_KIND_ATTR = `${HIDDEN_ATTR}-kind`;
   const HIDDEN_MARKER_SELECTOR = `[${HIDDEN_ATTR}], [${HIDDEN_KIND_ATTR}]`;
-  const SCRIPT_VERSION = "0.1.4";
+  const SCRIPT_VERSION = "0.1.5";
   const PROTECTED_SURFACE_SELECTOR = [
     "[data-codex-composer-root]",
     "[data-codex-composer]",
@@ -50,6 +50,9 @@
     /(剩余\s*\d+%\s*使用量|重置频率|下次重置时间|remaining\s+\d+%\s+usage|usage\s+remaining|reset\s+frequency|next\s+reset)/i;
   const actionTextRe =
     /(升级|Plus|upgrade|pricing|plan|重置|reset|限额|额度|限制|limit|quota)/i;
+  const plusUpsellRe =
+    /^(?:获取|开通|升级(?:至|到)?|免费试用|试用|Get|Try|Upgrade(?:\s+to)?)\s*(?:ChatGPT\s*)?Plus$/i;
+  const PLUS_UPSELL_SELECTOR = "button, a, [role='button']";
 
   function normalizeText(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
@@ -138,6 +141,22 @@
     return usageCardBox(node);
   }
 
+  function looksLikePlusUpsell(node) {
+    if (!node.matches(PLUS_UPSELL_SELECTOR)) return false;
+    if (!node.closest("header")) return false;
+    if (intersectsConversationContent(node)) return false;
+    return plusUpsellRe.test(candidateText(node));
+  }
+
+  function scanPlusUpsell(root) {
+    const nodes = Array.from(root.querySelectorAll(PLUS_UPSELL_SELECTOR));
+    if (root.matches(PLUS_UPSELL_SELECTOR)) nodes.unshift(root);
+    for (const node of nodes) {
+      if (node.closest(`[${HIDDEN_ATTR}="true"]`)) continue;
+      if (looksLikePlusUpsell(node)) hideNode(node, "plus-upsell");
+    }
+  }
+
   function hideNode(node, kind) {
     if (!isElement(node) || node === document.body || node === document.documentElement) return false;
     if (node.getAttribute(HIDDEN_ATTR) === "true") return false;
@@ -208,6 +227,7 @@
   function scanSubtree(root) {
     if (!isElement(root)) return false;
     state.scans += 1;
+    scanPlusUpsell(root);
     for (const node of collectCandidates(root)) classifyCandidate(node);
     return true;
   }
