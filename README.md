@@ -23,6 +23,7 @@
 - 底部的“Codex 消息限额已用尽”提醒横幅
 - 左侧栏的“剩余 0% 使用量”卡片
 - 英文界面中的新版 `You're out of Codex messages` 等额度提示弹窗/横幅
+- 顶栏的“获取 Plus”升级按钮（0.1.5 起，含 `Get Plus`、“升级至 Plus”等变体）
 
 不会做：
 
@@ -36,7 +37,7 @@
 ## 实现边界
 
 - 运行位置：由 Codex++ 作为用户脚本注入到 Codex Desktop 的 renderer 页面。
-- 保护边界：0.1.4 不会隐藏 composer、`form`、`contenteditable`、`textarea` 或 `input` 本身及包含它们的候选节点。
+- 保护边界：不会隐藏 composer、`form`、`contenteditable`、`textarea` 或 `input` 本身及包含它们的候选节点；顶栏升级按钮规则只匹配 `header` 内的完整按钮文本，不触碰会话内容。
 - 工作方式：启动时完整扫描一次；之后由 `MutationObserver` 只扫描新增或文字变化的局部 DOM，再用 CSS 隐藏匹配到的额度提醒节点。
 - 生命周期：重复注入会先销毁旧实例；`scan()` 和 `destroy()` 可重复调用，不会累积 observer、样式或隐藏标记。
 - 诊断入口：脚本会暴露 `window.__codexPlusHideUsageAlert`，可用于手动执行 `scan()` 或 `destroy()`。
